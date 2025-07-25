@@ -1,0 +1,5 @@
+ansible_ssh_common_args: >-
+  -o ProxyCommand="ssh -i /home/ubuntu/ChatApp.pem -W %h:%p ubuntu@{{ hostvars[groups['_Frontend'][0]].public_ip_address }}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+
+ansible_host: "{{ private_ip_address }}"
+ansible_ssh_private_key_file: /home/ubuntu/ChatApp.pem
