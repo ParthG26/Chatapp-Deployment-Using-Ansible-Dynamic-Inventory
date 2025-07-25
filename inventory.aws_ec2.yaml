@@ -5,7 +5,10 @@ regions:
   - ap-south-1
 filters:
   instance-state-name: running
-  tag:Name: [Frontend,Backend,Database]
+  tag:Name: 
+    - Frontend
+    - Backend
+    - Database
 keyed_groups:
   - key: tags.Name
     prefix: '_'
