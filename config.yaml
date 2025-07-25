@@ -1,0 +1,243 @@
+---
+- name: Configure MySQL server
+  hosts: _Database
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - secrets.yaml
+    - vars.yaml
+
+  tasks:
+    - name: install pymysql
+      apt:
+        name: python3-pymysql
+        state: present
+
+    - name: install mysql
+      apt:
+        name: mysql-server
+        state: present
+        update_cache: yes
+
+    - name: running status of mysql
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Allow MySQL to listen on all interfaces
+      lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        regexp: "^bind-address"
+        line: "bind-address = 0.0.0.0"
+        state: present
+      notify: Restart MySQL
+
+  handlers:
+    - name: Restart MySQL
+      service:
+        name: mysql
+        state: restarted
+
+    - name: Check if root password is already set
+      command: >
+        mysql -u root -e "SELECT User FROM mysql.user WHERE User='root';"
+      register: root_password_check
+      failed_when: false
+      changed_when: false
+
+    - name: Set root password and switch auth plugin (first run only)
+      mysql_user:
+        name: root
+        host: localhost
+        password: "{{ db_password }}"
+        plugin: mysql_native_password
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      when: "'using password' not in root_password_check.stderr"
+
+    - name: create mysql database
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ db_password }}"
+
+    - name: create mysql user
+      community.mysql.mysql_user:
+        name: "{{ db_username }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        host: "%"
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ db_password }}"
+
+- name: Configure Django backend server
+  hosts: _Backend
+  become: yes
+  gather_facts: yes
+
+  vars_files:
+    - vars.yaml
+    - secrets.yaml
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install required system packages
+      apt:
+        name:
+          - software-properties-common
+          - git
+        state: present
+
+    - name: Add deadsnakes PPA
+      apt_repository:
+        repo: ppa:deadsnakes/ppa
+        state: present
+
+    - name: Update apt cache after adding PPA
+      apt:
+        update_cache: yes
+
+    - name: Install Python 3.8 and dependencies
+      apt:
+        name:
+          - python3.8
+          - python3.8-venv
+          - python3.8-distutils
+          - gcc
+          - python3.8-dev
+          - default-libmysqlclient-dev
+          - build-essential
+          - pkg-config
+        state: present
+
+    - name: Clone Django app repo
+      git:
+        repo: "{{ gitrepo }}"
+        dest: "{{ app_dir }}"
+        version: HEAD
+        force: yes
+
+    - name: Ensure ubuntu owns the app directory
+      file:
+        path: "{{ app_dir }}"
+        owner: ubuntu
+        group: ubuntu
+        recurse: yes
+
+    - name: Create Python virtual environment
+      command: python3.8 -m venv {{ app_dir }}/venv
+      args:
+        creates: "{{ app_dir }}/venv"
+
+    - name: Upgrade pip in venv
+      command: "{{ app_dir }}/venv/bin/pip install --upgrade pip"
+
+    - name: Install pip requirements
+      pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ app_dir }}/venv"
+
+    - name: Install extra Python packages
+      pip:
+        name:
+          - mysqlclient
+          - gunicorn
+        virtualenv: "{{ app_dir }}/venv"
+
+    - name: Set environment variables in /etc/environment
+      lineinfile:
+        path: /etc/environment
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - "DB_NAME={{ db_name }}"
+        - "DB_USER={{ db_username }}"
+        - "DB_PASSWORD={{ db_password }}"
+        - "DB_HOST={{ db_host }}"
+        - "DB_PORT={{ db_port }}"
+
+    - name: Export environment variables for current session
+      shell: |
+        export DB_NAME={{ db_name }}
+        export DB_USER={{ db_username }}
+        export DB_PASSWORD={{ db_password }}
+        export DB_HOST={{ db_host }}
+        export DB_PORT={{ db_port }}
+
+    - name: Run Django makemigrations
+      command: "{{ app_dir }}/venv/bin/python manage.py makemigrations"
+      args:
+        chdir: "{{ app_dir }}/fundoo"
+
+    - name: Run Django migrate
+      command: "{{ app_dir }}/venv/bin/python manage.py migrate"
+      args:
+        chdir: "{{ app_dir }}/fundoo"
+
+    - name: Create Gunicorn systemd service file using template
+      become: true
+      template:
+        src: templates/gunicorn.service.j2
+        dest: /etc/systemd/system/gunicorn.service
+        mode: '0644'
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable Gunicorn service
+      systemd:
+        name: gunicorn
+        enabled: yes
+
+    - name: Start Gunicorn service
+      systemd:
+        name: gunicorn
+        state: started
+
+- name: Configure Nginx as frontend reverse proxy
+  hosts: _Frontend
+  become: yes
+  gather_facts: yes
+
+  vars:
+    backend_private_ip: "{{ hostvars[groups['_Backend'][0]].ansible_host }}"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Create Nginx reverse proxy config using jinja2
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/sites-available/chat_app.conf
+
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Enable chat_app Nginx site
+      file:
+        src: /etc/nginx/sites-available/chat_app.conf
+        dest: /etc/nginx/sites-enabled/chat_app.conf
+        state: link
+        force: yes
+
+    - name: Test Nginx configuration
+      command: nginx -t
+
+    - name: Restart Nginx
+      service:
+        name: nginx

@@ -1,0 +1,28 @@
+plugin: amazon.aws.aws_ec2
+strict: false
+use_extra_vars: true 
+regions:
+  - ap-south-1
+filters:
+  instance-state-name: running
+  tag:Name: [Frontend,Backend,Database]
+keyed_groups:
+  - key: tags.Name
+    prefix: '_'
+    separator: ''
+hostnames:
+  - private-ip-address
+compose:
+  ansible_ssh_private_key_file: "home/ubuntu/ChatApp.pem"
+  public_ip: "{{public_ip_address}}"
+  private_ip: "{{private_ip_address}}"
+  key_file_path: "/home/ubuntu/ChatApp.pem"
+  ansible_user: ubuntu
+  ansible_host: private_ip_address
+  ansible_ssh_common_args: >-
+    {% if tags.Name != 'Frontend' %}
+    -o ProxyCommand="ssh -i /home/ubuntu/ChatApp.pem -W %h:%p ubuntu@{{ hostvars[groups['_Frontend'][0]].public_ip_address }}"
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    {% else %}
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    {% endif %}
